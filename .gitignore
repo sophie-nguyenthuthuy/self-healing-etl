@@ -14,3 +14,12 @@ build/
 *.egg-info/
 .DS_Store
 .prefect/
+
+# IDE
+.vscode/
+.idea/
+
+# Data and Logs
+*.csv
+*.jsonl
+*.log
