@@ -16,8 +16,13 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
+
+# Disable Prefect telemetry to prevent SQLite concurrent lock errors during async execution
+os.environ["PREFECT_SERVER_ANALYTICS_ENABLED"] = "false"
+os.environ["DO_NOT_TRACK"] = "1"
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
