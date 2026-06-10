@@ -45,7 +45,25 @@ pip install -r requirements.txt
 
 # Run the built-in demo
 python main.py --demo
+
+# Run the real-time taxi ETL simulation
+python main.py --taxi-demo --taxi-records 30
+
+# Run executable failure/healing scenario coverage
+python main.py --failure-scenarios
+
+# Include intentional unrecoverable source/load failures
+python main.py --failure-scenarios --include-hard-failures
+
+# Run agentic autonomous mode
+python main.py --taxi-demo --taxi-records 30 --autonomous-mode
 ```
+
+## Documentation
+
+Detailed design and operations documentation is available in [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md).
+
+Autonomous mode documentation is available in [docs/AGENTIC_SELF_HEALING.md](docs/AGENTIC_SELF_HEALING.md).
 
 ## Demo
 
@@ -56,6 +74,49 @@ The demo simulates three consecutive pipeline runs against the same source:
 | 1 | Baseline 100 rows | None | 100 rows loaded; schema v1 registered |
 | 2 | `amount` type changed to string, `region` added, `status` removed | 3 simultaneous drift types | Coercion loss exceeds threshold → 100 rows quarantined + ERROR alert |
 | 3 | Post-drift clean data | `region` added, `status` removed (no type issue) | Auto-healed: backfill + schema evolution to v2; 50 rows loaded |
+
+## Real-Time Taxi ETL
+
+The project now includes a real-time NYC Taxi-style ETL implementation that reuses the same self-healing framework:
+
+```
+taxi_etl/
+├── producer.py             # Streams synthetic or TLC CSV records into incoming/
+├── transform.py            # Cleans, validates, and enriches taxi trips
+├── warehouse.py            # Raw, fact, dimension, and summary table helpers
+├── realtime.py             # Polling file watcher + self-healing ETL integration
+└── dashboard/app.py        # Streamlit live analytics dashboard
+```
+
+Run a complete local simulation:
+
+```bash
+python main.py --taxi-demo --taxi-records 30 --taxi-batch-size 5
+```
+
+Stream from a downloaded NYC TLC CSV:
+
+```bash
+python main.py --taxi-demo \
+  --taxi-source-csv data/taxi/raw/yellow_tripdata_sample.csv \
+  --taxi-records 100
+```
+
+Run the incoming-folder watcher continuously:
+
+```bash
+python main.py --taxi-stream
+```
+
+Launch the dashboard:
+
+```bash
+streamlit run taxi_etl/dashboard/app.py
+```
+
+By default, the taxi implementation writes to `data/taxi/taxi_warehouse.db`. Pass `--warehouse-db postgresql://user:pass@host/dbname` to use PostgreSQL. The warehouse contains `raw_taxi_trip`, `fact_taxi_trip`, `dim_date`, `dim_payment`, and `trip_summary`.
+
+The taxi producer intentionally introduces a mid-stream drift in demo mode (`fare_amount` as a currency string plus a new `congestion_surcharge` column), so the existing drift detection, healing, quarantine, MTTD, and MTTR metrics are visible in a realistic ETL workflow.
 
 ## CLI Usage
 
@@ -92,6 +153,20 @@ python main.py --source events.jsonl --source-type jsonl \
 | `--no-evolution` | off | Disable schema auto-evolution |
 | `--slack-webhook` | — | Slack incoming webhook URL |
 | `--demo` | — | Run the built-in 3-run demo |
+| `--failure-scenarios` | off | Run executable ETL failure and auto-healing scenario coverage |
+| `--autonomous-mode` | off | Enable event-driven agentic RCA, planning, healing audit, validation, and recovery |
+| `--human-approval` | off | In autonomous mode, persist the healing plan for approval instead of executing it |
+| `--include-hard-failures` | off | Include intentional missing-source and invalid-destination failures in scenario coverage |
+| `--taxi-demo` | off | Run the real-time taxi ETL simulation once |
+| `--taxi-stream` | off | Continuously watch `data/taxi/incoming` for taxi micro-batches |
+| `--taxi-records` | `30` | Number of synthetic/source records to emit for `--taxi-demo` |
+| `--taxi-batch-size` | `5` | Records per incoming micro-batch |
+| `--taxi-source-csv` | — | Optional NYC TLC CSV file to stream instead of synthetic records |
+| `--warehouse-db` | `data/taxi/taxi_warehouse.db` | SQLAlchemy warehouse URL for taxi ETL |
+| `--taxi-root` | `data/taxi` | Runtime folder for taxi incoming, processed, and SQLite state files |
+| `--taxi-no-drift` | off | Disable intentional taxi drift injection |
+| `--taxi-drift-after` | auto | Record number after which intentional taxi drift starts |
+| `--taxi-random-failures` | off | Inject random taxi schema/type/data-quality failures for autonomous discovery |
 
 ## Programmatic Usage
 

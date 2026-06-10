@@ -24,6 +24,16 @@ class HealingConfig(BaseModel):
     max_coercion_loss_pct: float = 5.0     # quarantine batch if >5% of rows need coercion
 
 
+class AutonomousConfig(BaseModel):
+    enable_autonomous_healing: bool = False
+    require_human_approval: bool = False
+    max_healing_attempts: int = 3
+    ollama_enabled: bool = True
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.2:latest"
+    ollama_fallback_model: str = "llama3.2:latest"
+
+
 class SchemaRegistryConfig(BaseModel):
     db_url: str = "sqlite:///schema_registry.db"
     strict_mode: bool = False  # True = reject any schema drift without healing
@@ -37,6 +47,7 @@ class ETLConfig(BaseModel):
     schema_registry: SchemaRegistryConfig = Field(default_factory=SchemaRegistryConfig)
     quarantine: QuarantineConfig = Field(default_factory=QuarantineConfig)
     healing: HealingConfig = Field(default_factory=HealingConfig)
+    autonomous: AutonomousConfig = Field(default_factory=AutonomousConfig)
     alerts: AlertConfig = Field(default_factory=AlertConfig)
     data_dir: Path = Field(default=Path("./data"))
 
@@ -54,5 +65,13 @@ class ETLConfig(BaseModel):
             alerts=AlertConfig(
                 slack_webhook_url=os.getenv("SLACK_WEBHOOK_URL"),
                 email_to=list(filter(None, os.getenv("ALERT_EMAIL_TO", "").split(","))),
+            ),
+            autonomous=AutonomousConfig(
+                enable_autonomous_healing=os.getenv("ENABLE_AUTONOMOUS_HEALING", "false").lower() == "true",
+                require_human_approval=os.getenv("REQUIRE_HEALING_APPROVAL", "false").lower() == "true",
+                ollama_enabled=os.getenv("OLLAMA_ENABLED", "true").lower() == "true",
+                ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:latest"),
+                ollama_fallback_model=os.getenv("OLLAMA_FALLBACK_MODEL", "llama3.2:latest"),
             ),
         )

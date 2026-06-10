@@ -23,3 +23,10 @@ build/
 *.csv
 *.jsonl
 *.log
+*.db-journal
+*.sqlite-journal
+*.tmp
+*.zip
+log*.txt
+.demo_data/
+data/

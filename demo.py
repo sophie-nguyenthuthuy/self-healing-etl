@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import sys
 import logging
+import os
+import tempfile
+import uuid
 from pathlib import Path
 
 # Ensure project root is on sys.path so imports resolve
@@ -29,6 +32,17 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich import print as rprint
+
+_prefect_home = Path(tempfile.gettempdir()) / f"self_healing_prefect_home_{uuid.uuid4().hex}"
+_prefect_home.mkdir(parents=True, exist_ok=True)
+os.environ["PREFECT_HOME"] = str(_prefect_home)
+os.environ["PREFECT_PROFILES_PATH"] = str(_prefect_home / "profiles.toml")
+os.environ["PREFECT_RESULTS_PERSIST_BY_DEFAULT"] = "false"
+os.environ["PREFECT_SERVER_MEMOIZE_BLOCK_AUTO_REGISTRATION"] = "false"
+os.environ["PREFECT_SERVER_MEMO_STORE_PATH"] = str(_prefect_home / "memo_store.toml")
+os.environ["PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_ENABLED"] = "false"
+_prefect_db = Path(tempfile.gettempdir()) / f"self_healing_prefect_{uuid.uuid4().hex}.db"
+os.environ["PREFECT_SERVER_DATABASE_CONNECTION_URL"] = f"sqlite+aiosqlite:///{_prefect_db.as_posix()}"
 
 from config import ETLConfig, HealingConfig, AlertConfig, SchemaRegistryConfig, QuarantineConfig
 from pipeline.orchestrator import etl_flow
@@ -51,8 +65,12 @@ console = Console()
 CFG = ETLConfig(
     pipeline_name="orders_pipeline",
     batch_size=50,
-    schema_registry=SchemaRegistryConfig(db_url="sqlite:///demo_registry.db"),
-    quarantine=QuarantineConfig(db_url="sqlite:///demo_quarantine.db"),
+    schema_registry=SchemaRegistryConfig(
+        db_url="sqlite:///file:self_healing_demo_registry?mode=memory&cache=shared&uri=true"
+    ),
+    quarantine=QuarantineConfig(
+        db_url="sqlite:///file:self_healing_demo_quarantine?mode=memory&cache=shared&uri=true"
+    ),
     healing=HealingConfig(
         enable_type_coercion=True,
         enable_column_backfill=True,
@@ -144,6 +162,28 @@ def print_quarantine_summary(store: QuarantineStore) -> None:
     for err_type, cnt in stats.get("by_error_type", {}).items():
         t.add_row(f"  [{err_type}]", str(cnt))
     console.print(t)
+
+    metrics = Table(title="Evaluation Metrics", show_header=True, header_style="bold magenta")
+    metrics.add_column("Metric")
+    metrics.add_column("Value")
+    metrics.add_column("Samples")
+    metrics.add_row(
+        "MTTD - pipeline detection latency",
+        _format_seconds(stats["mttd_seconds"]),
+        str(stats["mttd_sample_count"]),
+    )
+    metrics.add_row(
+        "MTTR - manual quarantine resolution",
+        _format_seconds(stats["mttr_seconds"]),
+        str(stats["mttr_sample_count"]),
+    )
+    console.print(metrics)
+
+
+def _format_seconds(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.3f}s"
 
 
 # ── Main demo ─────────────────────────────────────────────────────────────────
