@@ -38,14 +38,20 @@ class AutonomousLoopResult:
 
 
 class AutonomousHealingLoop:
-    def __init__(self, db_url: str, config: AutonomousConfig):
+    def __init__(
+        self,
+        db_url: str,
+        config: AutonomousConfig,
+        *,
+        healing_engine: Any | None = None,
+    ):
         self.db_url = db_url
         self.config = config
         self.event_bus = EventBus(db_url)
         self.observer = ObserverAgent()
         self.rca = RCAAgent(db_url, config)
         self.planner = PlannerAgent()
-        self.healer = HealerAgent(AutonomousHealingEngine(db_url))
+        self.healer = HealerAgent(healing_engine or AutonomousHealingEngine(db_url))
         self.validator = ValidatorAgent()
         self.telemetry = TelemetryReader(db_url)
         self.incidents = IncidentStore(db_url)
@@ -134,6 +140,7 @@ class AutonomousHealingLoop:
                     root_cause=rca.root_cause,
                     healing_action=action_summary,
                     successful=True,
+                    source_domain="K8S" if event.component.startswith("k8s_") else "ETL",
                 )
                 self.event_bus.emit(
                     run_id=event.run_id,
@@ -153,6 +160,7 @@ class AutonomousHealingLoop:
             root_cause=rca.root_cause,
             healing_action=", ".join(action.action_type for action in all_actions),
             successful=False,
+            source_domain="K8S" if event.component.startswith("k8s_") else "ETL",
         )
         self.event_bus.emit(
             run_id=event.run_id,
@@ -166,4 +174,3 @@ class AutonomousHealingLoop:
             metadata={"attempts": self.config.max_healing_attempts, "root_cause": rca.root_cause},
         )
         return AutonomousLoopResult(False, self.config.max_healing_attempts, rca, validation, all_actions, escalated=True)
-

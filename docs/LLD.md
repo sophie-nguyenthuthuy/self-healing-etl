@@ -19,11 +19,19 @@
 | `alerts/alerter.py` | Console and Slack alerting with root-cause hints. |
 | `taxi_etl/*` | Real-time taxi producer, transformer, warehouse, runtime config, and dashboard. |
 | `scenarios/failure_scenarios.py` | Executable failure and auto-healing scenarios. |
+| `scenarios/failure_injector.py` | Unified demo injector for K8s and modern ETL staging/connectivity failures. |
+| `scenarios/k8s_failure_injector.py` | Real-cluster K8s failure injection for local demos. |
 | `agents/*` | Observer, RCA, planner, healer, validator, approvals, and autonomous loop. |
+| `agents/k8s_observer.py` | Kubernetes workload observer that emits K8s failure events through `EventBus`. |
+| `agents/ai_sre_loop.py` | K8s AI-SRE orchestration glue with dedupe and injected `K8sHealingEngine`. |
 | `observability/*` | Event bus, trace/span helpers, telemetry readers, and dashboard metrics. |
 | `knowledge/*` | Incident memory, deterministic runbooks, and healing action history. |
 | `llm/ollama_client.py` | Optional Ollama JSON-generation client with deterministic fallback. |
 | `healing/autonomous_healing.py` | Bounded autonomous healing executor and audit integration. |
+| `healing/k8s_healing.py` | Bounded Kubernetes healing executor and audit/approval integration. |
+| `deployment/*` | Dockerfiles and Kubernetes manifests for local Docker K8s demo. |
+| `deploy_local_demo.ps1` | Builds images, applies manifests, restarts deployments, and waits for readiness. |
+| `demo_k8s.py` | Interactive K8s failure injection and recovery demo. |
 
 ## Configuration Objects
 
@@ -303,6 +311,53 @@ Hard source/load failures are opt-in through `--include-hard-failures`.
 
 Human-in-the-loop mode sets `require_human_approval=True`, which persists the generated plan in `human_approvals` and emits `HumanApprovalRequested`.
 
+`AutonomousHealingLoop` accepts an optional injected `healing_engine`. The ETL path uses `AutonomousHealingEngine`; the Kubernetes AI-SRE path injects `K8sHealingEngine` without changing the existing ETL loop API.
+
+## Kubernetes AI-SRE Loop
+
+`AISRELoop` coordinates the Kubernetes extension:
+
+1. `K8sObserver` polls pods, deployments, and jobs in a namespace.
+2. Events are emitted through the existing `EventBus`.
+3. `ObserverAgent` filters failure events.
+4. `AISRELoop` deduplicates rapid repeats by event type, component, namespace, and object name.
+5. `AutonomousHealingLoop` performs RCA, planning, healing, validation, and incident recording.
+6. `K8sHealingEngine` executes workload-scoped actions and records audit rows with `agent='K8sHealingEngine'`.
+
+K8s observer detection:
+
+| Signal | Event |
+|---|---|
+| Pod waiting reason `CrashLoopBackOff` | `K8sPodCrashLoopDetected` |
+| Pod waiting reason `ImagePullBackOff` or `ErrImagePull` | `K8sImagePullFailed` |
+| Last terminated reason `OOMKilled` | `K8sOOMKilled` |
+| Restart count above threshold | `K8sHighRestartCount` |
+| Deployment unavailable replicas or zero desired replicas | `K8sDeploymentDegraded` |
+| Job failed pods | `K8sJobFailed` |
+
+The observer probe is namespace-scoped (`list_namespaced_pod`) so the service account does not need broad namespace-list permissions.
+
+## Local Docker Kubernetes Demo Flow
+
+`deploy_local_demo.ps1` builds the ETL and AI-SRE images, applies manifests, restarts deployments to pick up rebuilt `latest` tags, and waits for readiness.
+
+`demo_k8s.py --scenario image_pull`:
+
+1. Confirms `kubectl` access.
+2. Captures pod state.
+3. Uses `K8sFailureInjector` to patch the ETL Deployment image to an invalid registry image.
+4. Waits until the current Deployment generation is fully ready again.
+5. Streams AI-SRE logs and prints approximate wall-clock MTTR.
+
+The same entry point supports local ETL failure injection without Kubernetes:
+
+| Scenario | Behavior |
+|---|---|
+| `api_rate_limit` | Emits an extractor HTTP 429 event and validates backoff plus retry actions. |
+| `staging_data_quality` | Quarantines duplicate/null-key staging rows and records isolate/replay actions. |
+| `timeout` | Emits a destination timeout and validates idempotent staging/load retry. |
+| `concurrent_modification` | Emits a staging write conflict and validates rollback plus retry actions. |
+
 ## Known Technical Constraints
 
 - Extractor currently materializes all batches in memory.
@@ -310,3 +365,5 @@ Human-in-the-loop mode sets `require_human_approval=True`, which persists the ge
 - Type inference depends on pandas dtype behavior.
 - Loader adds new DB columns as `TEXT`; production systems should map stronger SQL types.
 - True upstream MTTD requires a business event timestamp, which is not assumed.
+- The local K8s demo uses `latest` image tags for convenience; production should use immutable image digests or version tags.
+- The Kubernetes demo's MTTR is measured by `demo_k8s.py` from injection time to Deployment readiness, not from persisted incident timestamps.

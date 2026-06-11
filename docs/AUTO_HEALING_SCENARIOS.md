@@ -70,6 +70,51 @@ Disable drift:
 python -B main.py --taxi-demo --taxi-no-drift
 ```
 
+## Kubernetes AI-SRE Scenarios
+
+The Kubernetes scenarios run against a real local cluster and are separate from `--failure-scenarios`.
+
+Deploy the local demo first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy_local_demo.ps1
+```
+
+Then inject a Kubernetes failure:
+
+| Scenario | Command | Expected Behavior |
+|---|---|---|
+| Image pull failure | `python demo_k8s.py --scenario image_pull` | ETL deployment is patched to an invalid image; AI-SRE detects degradation/image-pull failure and rolls back to the previous image. |
+| Crash loop | `python demo_k8s.py --scenario crash_loop` | ETL container exits immediately; AI-SRE detects crash-loop signals and attempts restart/rollback/log inspection. |
+| OOM | `python demo_k8s.py --scenario oom` | ETL memory limit is reduced to `1Mi`; OOM remediation is approval-oriented because resource changes affect stability/cost. |
+| Scale zero | `python demo_k8s.py --scenario scale_zero` | ETL deployment is scaled to zero; AI-SRE detects a degraded deployment and plans scale/restart actions. |
+
+Validated local Docker Desktop result for `image_pull`:
+
+```text
+Deployment recovered. Approximate MTTR: 17.7s
+```
+
+## Modern ETL Staging And Connectivity Scenarios
+
+The unified live demo entry point also covers modern ETL failures without requiring a Kubernetes cluster:
+
+```bash
+python demo_k8s.py --scenario api_rate_limit
+python demo_k8s.py --scenario staging_data_quality
+python demo_k8s.py --scenario timeout
+python demo_k8s.py --scenario concurrent_modification
+```
+
+| Scenario | Platform Pattern | Failure Injected | Recovery Evidence |
+|---|---|---|---|
+| `api_rate_limit` | Salesforce and SaaS extractors | Emits an `ExtractFailed` event with HTTP `429 Too Many Requests`. | RCA classifies `API Rate Limit`; plan executes `apply_exponential_backoff` and `retry_extraction`. |
+| `staging_data_quality` | dbt and Snowflake staging tests | Adds duplicate keys and unexpected null keys to a staging-style taxi batch. | Violating rows are inserted into `quarantine_records`; clean rows continue; autonomous loop records isolate/replay actions. |
+| `timeout` | Microsoft Fabric/lakehouse connectivity | Emits a destination timeout while writing a staging batch. | RCA classifies `Connectivity Timeout`; plan executes `retry_staging_task` and `retry_loading`. |
+| `concurrent_modification` | Databricks Delta write conflict | Emits a concurrent modification failure during staging write. | RCA classifies `Concurrent Staging Write`; plan executes `rollback_transaction` and `retry_staging_task`. |
+
+These scenarios persist events and healing actions to a local SQLite observability DB printed by the demo command.
+
 ## Manual Rerun Cases
 
 Some failures should remain manual because automatic repair would risk data correctness:
@@ -99,4 +144,3 @@ select source_name, error_type, resolved, quarantined_at, resolved_at
 from quarantine_records
 order by quarantined_at desc;
 ```
-

@@ -46,12 +46,24 @@ class AutonomousHealingEngine:
         "retry",
         "retry_loading",
         "retry_extraction",
+        "retry_staging_task",
+        "apply_exponential_backoff",
+        "rollback_transaction",
         "add_missing_destination_column",
         "create_missing_table",
         "reconnect_database",
         "reduce_batch_size",
         "split_batch",
         "collect_more_telemetry",
+        "restart_deployment",
+        "scale_deployment",
+        "retry_job",
+        "rollback_deployment",
+        "refresh_configmap",
+        "inspect_image",
+        "inspect_pod_logs",
+        "validate_registry",
+        "inspect_node_resources",
     }
 
     def __init__(self, db_url: str):
@@ -99,6 +111,14 @@ class AutonomousHealingEngine:
             after["batch_size"] = max(1, current // 2)
         if action_type in {"reconnect_database", "retry_loading", "retry_extraction", "retry"}:
             after["retry_recommended"] = True
+        if action_type == "retry_staging_task":
+            after["staging_retry_requested"] = True
+            after["idempotent_retry"] = True
+        if action_type == "apply_exponential_backoff":
+            after["backoff_policy"] = {"strategy": "exponential", "initial_seconds": 2, "max_seconds": 60}
+            after["retry_recommended"] = True
+        if action_type == "rollback_transaction":
+            after["transaction_rollback_requested"] = True
         if action_type in {"replay_failed_batch", "replay_quarantine_records", "replay_clean_rows"}:
             after["replay_requested"] = True
         return HealingExecutionResult(
@@ -108,4 +128,3 @@ class AutonomousHealingEngine:
             after_state=after,
             message=f"Executed bounded autonomous action: {action_type}",
         )
-

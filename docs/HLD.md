@@ -97,6 +97,37 @@ flowchart TB
     Dashboard --> Warehouse
 ```
 
+### Kubernetes AI-SRE Deployment View
+
+```mermaid
+flowchart TB
+    subgraph Cluster["Kubernetes Cluster"]
+        ETL["Self-Healing ETL Deployment"]
+        AISRE["AI-SRE Deployment"]
+        Loop["AISRELoop"]
+        API["Kubernetes API"]
+        PG["PostgreSQL StatefulSet"]
+    end
+
+    subgraph Shared["Shared Framework Tables"]
+        Events["pipeline_events"]
+        Incidents["incident_history"]
+        Actions["healing_actions"]
+        Approvals["human_approvals"]
+    end
+
+    AISRE --> Loop
+    Loop --> API
+    AISRE --> Events
+    AISRE --> Incidents
+    AISRE --> Actions
+    AISRE --> Approvals
+    ETL --> PG
+    AISRE --> PG
+```
+
+The Kubernetes AI-SRE layer is optional. `AISRELoop` runs in the AI-SRE deployment, uses `K8sObserver` to watch pods, deployments, and jobs, deduplicates rapid repeat events, and sends failures through the existing autonomous RCA/planning/healing loop. K8s events are persisted through the existing `EventBus`, remediations are audited in `healing_actions`, and high-risk changes reuse the existing human approval workflow.
+
 ## Runtime Modes
 
 | Mode | Command | Purpose |
@@ -108,6 +139,8 @@ flowchart TB
 | Auto-healing scenarios | `python main.py --failure-scenarios` | Runs recoverable and quarantine scenarios without hard pipeline failures. |
 | Hard-failure drills | `python main.py --failure-scenarios --include-hard-failures` | Adds missing-source and invalid-destination failures for manual rerun evidence. |
 | Autonomous mode | `python main.py --taxi-demo --autonomous-mode` | Enables event-driven RCA, planning, healing, validation, and recovery audit. |
+| Local K8s deploy | `powershell -ExecutionPolicy Bypass -File .\deploy_local_demo.ps1` | Builds local images, applies K8s manifests, restarts deployments, and waits for readiness. |
+| Local K8s self-healing demo | `python demo_k8s.py --scenario image_pull` | Injects a real Deployment image-pull failure and watches AI-SRE recover it. |
 
 ## Data Flow
 
@@ -134,6 +167,9 @@ flowchart TB
 | Join missing dimension member | Map to configured unknown member in scenario transform. |
 | Join duplicate dimension keys | Deduplicate dimension rows before join in scenario transform. |
 | Loader schema addition | Alter DB table with missing columns before append. |
+| K8s ImagePullBackOff | Inspect image, validate registry, and rollback deployment. |
+| K8s CrashLoopBackOff | Restart deployment, rollback deployment, and inspect logs. |
+| K8s degraded deployment | Scale or restart deployment when safe. |
 
 ## Metrics
 
@@ -141,6 +177,7 @@ flowchart TB
 |---|---|
 | MTTD | Pipeline detection latency: `DriftEvent.detected_at - PipelineRun.started_at`. |
 | MTTR | Manual quarantine resolution latency: `QuarantineRecord.resolved_at - QuarantineRecord.quarantined_at`. |
+| K8s demo MTTR | Wall-clock duration in `demo_k8s.py` from failure injection to latest Deployment generation becoming ready and available. |
 
 MTTD is intentionally not treated as true upstream incident detection time because the framework does not assume a universal business timestamp column such as `event_time`.
 
@@ -153,6 +190,7 @@ MTTD is intentionally not treated as true upstream incident detection time becau
 - Keep hard failures opt-in so the default scenario suite proves auto-healing without ending in an intentional OS-level failure.
 - Keep Ollama optional and use deterministic RCA when it is unavailable.
 - Persist every autonomous decision in `pipeline_events`, `incident_history`, `healing_actions`, or `human_approvals`.
+- Keep Kubernetes AI-SRE as an extension layer by injecting `K8sHealingEngine` into the autonomous loop instead of replacing ETL healing.
 
 ## Assumptions
 
@@ -170,3 +208,5 @@ MTTD is intentionally not treated as true upstream incident detection time becau
 | Downstream schema mismatch | Loader can add missing table columns for healed/evolved batches. |
 | Demo permission issues in OneDrive/user home | Prefect runtime state is routed to temp folders. |
 | Hidden data-quality issues | Failed records are stored with raw JSON, error type, detail, and root-cause hints. |
+| Local K8s demo reports stale readiness | `demo_k8s.py` checks observed generation, updated replicas, ready replicas, available replicas, and unavailable replicas. |
+| Local `latest` images not refreshed in cluster | `deploy_local_demo.ps1` restarts ETL and AI-SRE deployments after rebuilding images. |

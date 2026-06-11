@@ -31,8 +31,28 @@ class PlannerAgent:
         "destination": ["Add Missing Destination Column", "Retry Loading"],
         "table": ["Create Missing Table", "Retry Loading"],
         "database": ["Reconnect Database", "Retry Loading"],
+        "api rate": ["Apply Exponential Backoff", "Retry Extraction"],
+        "rate limit": ["Apply Exponential Backoff", "Retry Extraction"],
+        "too many requests": ["Apply Exponential Backoff", "Retry Extraction"],
+        "timeout": ["Retry Staging Task", "Retry Loading"],
+        "connectivity": ["Retry Staging Task", "Retry Loading"],
+        "concurrent": ["Rollback Transaction", "Retry Staging Task"],
+        "staging write": ["Rollback Transaction", "Retry Staging Task"],
+        "data quality": ["Isolate Bad Rows", "Replay Clean Rows"],
+        "constraint": ["Isolate Bad Rows", "Replay Clean Rows"],
         "resource": ["Split Batch", "Reduce Batch Size", "Retry"],
         "permission": ["Escalate Human Review"],
+        "crashloop": ["Restart Deployment", "Rollback Deployment", "Inspect Pod Logs", "Escalate Human Review"],
+        "imagepull": ["Inspect Image", "Validate Registry", "Rollback Deployment"],
+        "oomkilled": ["Increase Memory Limit", "Escalate Human Review"],
+        "k8s job": ["Retry Job", "Inspect Pod Logs", "Escalate Human Review"],
+        "deploymentdegraded": ["Scale Deployment", "Restart Deployment", "Escalate Human Review"],
+        "deployment degraded": ["Scale Deployment", "Restart Deployment", "Escalate Human Review"],
+        "scheduling": ["Inspect Node Resources", "Escalate Human Review"],
+        "k8s secret": ["Refresh Secret", "Escalate Human Review"],
+        "missingsecret": ["Refresh Secret", "Escalate Human Review"],
+        "k8s configmap": ["Refresh ConfigMap", "Escalate Human Review"],
+        "missingconfigmap": ["Refresh ConfigMap", "Escalate Human Review"],
         "unknown": ["Collect More Telemetry", "Escalate Human Review"],
     }
 
@@ -59,4 +79,3 @@ class PlannerAgent:
 
     def _normalize_action(self, action: str) -> str:
         return action.lower().replace(" ", "_").replace("-", "_")
-

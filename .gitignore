@@ -14,6 +14,8 @@ build/
 *.egg-info/
 .DS_Store
 .prefect/
+.pytest_cache/
+pytest-cache-files-*/
 
 # IDE
 .vscode/

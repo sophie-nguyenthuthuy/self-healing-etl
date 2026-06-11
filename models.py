@@ -97,6 +97,7 @@ class IncidentHistory(Base):
     failure_signature = Column(String(512), nullable=False, index=True)
     root_cause = Column(Text, nullable=False)
     healing_action = Column(Text, nullable=True)
+    source_domain = Column(String(32), nullable=False, default="ETL", index=True)
     successful = Column(Boolean, default=False, index=True)
     timestamp = Column(DateTime, default=datetime.utcnow, index=True)
 
@@ -132,7 +133,25 @@ class HumanApproval(Base):
 def init_db(db_url: str) -> "Engine":
     engine = create_engine(db_url, echo=False)
     Base.metadata.create_all(engine)
+    ensure_incident_schema(engine)
     return engine
+
+
+def ensure_incident_schema(engine) -> None:
+    """Apply additive incident schema updates for existing local SQLite databases."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    inspector = inspect(engine)
+    if "incident_history" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("incident_history")}
+    if "source_domain" in columns:
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE incident_history ADD COLUMN source_domain VARCHAR(32) DEFAULT 'ETL' NOT NULL"))
 
 
 def ensure_quarantine_schema(engine) -> None:

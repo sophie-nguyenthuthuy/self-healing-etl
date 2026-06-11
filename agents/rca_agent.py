@@ -30,9 +30,9 @@ class RCAResult:
 
 
 class RCAAgent:
-    PROMPT = """You are a Senior ETL Site Reliability Engineer.
+    PROMPT = """You are a Senior ETL and Kubernetes Site Reliability Engineer.
 
-Analyze the ETL failure.
+Analyze the ETL or Kubernetes failure.
 
 Determine:
 - root cause
@@ -128,9 +128,13 @@ Return JSON only.
         telemetry: dict[str, Any] | None,
     ) -> str:
         chunks = [event.event_type, event.component, event.message, json.dumps(event.metadata, default=str)]
+        if event.component.startswith("k8s_"):
+            chunks.append(
+                "k8s context: classify cluster workload state, image retrieval, memory, job, "
+                "deployment availability, and restart-count failures from event metadata."
+            )
         for recent in recent_events or []:
             chunks.append(getattr(recent, "message", str(recent)))
         if telemetry:
             chunks.append(json.dumps(telemetry, default=str))
         return " | ".join(chunks)
-

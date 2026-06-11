@@ -41,6 +41,8 @@ Existing CLI modes remain unchanged. Autonomous behavior is opt-in through `--au
 | `agents/healer_agent.py` | Executes plan steps through the autonomous healing engine. |
 | `agents/validator_agent.py` | Validates recovery confidence. |
 | `agents/autonomous_loop.py` | Runs RCA -> plan -> heal -> validate up to 3 attempts. |
+| `agents/ai_sre_loop.py` | Connects Kubernetes observation to the autonomous loop with event deduplication. |
+| `agents/k8s_observer.py` | Emits Kubernetes workload failures through the existing event bus. |
 | `observability/event_bus.py` | Persists and publishes pipeline events. |
 | `observability/telemetry.py` | Reads run, event, and quarantine telemetry. |
 | `observability/traces.py` | Generates trace and span IDs. |
@@ -49,6 +51,7 @@ Existing CLI modes remain unchanged. Autonomous behavior is opt-in through `--au
 | `knowledge/runbook_store.py` | Provides deterministic RCA fallback rules. |
 | `knowledge/healing_history.py` | Persists healing action audit records. |
 | `healing/autonomous_healing.py` | Executes bounded autonomous healing actions. |
+| `healing/k8s_healing.py` | Executes bounded Kubernetes actions and reuses audit/approval tables. |
 | `llm/ollama_client.py` | Optional Ollama JSON generation client. |
 
 ## Observability Events
@@ -76,6 +79,13 @@ Current emitted events include:
 - `PipelineCompleted`
 - `PipelineFailed`
 - `HumanApprovalRequested`
+- `K8sDeploymentDegraded`
+- `K8sImagePullFailed`
+- `K8sPodCrashLoopDetected`
+- `K8sOOMKilled`
+- `K8sJobFailed`
+- `K8sHighRestartCount`
+- `K8sDiagnosticLog`
 
 ## RCA Behavior
 
@@ -103,6 +113,9 @@ Supported plan/action categories include:
 - batch replay
 - retry extraction
 - retry loading
+- retry staging task
+- apply exponential backoff
+- rollback transaction
 - replay quarantine records
 - create missing table
 - add missing destination column
@@ -111,6 +124,21 @@ Supported plan/action categories include:
 - split batch
 - collect more telemetry
 - escalate human review
+
+Kubernetes AI-SRE plan/action categories include:
+
+- restart deployment
+- rollback deployment
+- scale deployment
+- retry job
+- inspect image
+- inspect pod logs
+- validate registry
+- inspect node resources
+- refresh ConfigMap
+- collect more telemetry
+
+Kubernetes actions run through `K8sHealingEngine` when `AutonomousHealingLoop` is constructed with an injected `healing_engine`.
 
 Risky actions are persisted and escalated instead of pretending to execute external infrastructure operations.
 
@@ -140,5 +168,40 @@ The Streamlit dashboard now includes tabs for:
 4. Healing Timeline
 5. Agent Decisions
 6. Taxi Analytics
+7. Kubernetes Health
+8. Cluster Events
+9. AI-SRE Incidents
+10. Healing Actions
+11. Recovery Metrics
 
 The dashboard reads `pipeline_events`, `healing_actions`, and `human_approvals` from the observability DB URL, which defaults to the taxi quarantine database.
+
+Kubernetes tabs use the same observability DB and show empty states gracefully when no cluster events are present.
+
+The sidebar includes:
+
+- Observability DB URL.
+- Observability scope selector, with `All pipelines` as the default.
+- Auto-refresh interval, defaulting to 120 seconds.
+- Manual `Refresh now` button.
+
+Pipeline Health, Live Events, Root Cause Analysis, Healing Timeline, Agent Decisions, and K8s recovery views now use the same selected scope so failure/healing traces do not appear in one tab while disappearing from the related tabs.
+
+## Kubernetes AI-SRE Mode
+
+The local Kubernetes demo uses `agents.ai_sre_loop` inside the AI-SRE container:
+
+```bash
+python -m agents.ai_sre_loop
+```
+
+`AISRELoop` polls Kubernetes through `K8sObserver`, subscribes `ObserverAgent` to the shared `EventBus`, deduplicates repeated failures, and forwards failure events to `AutonomousHealingLoop` with `K8sHealingEngine` injected.
+
+The validated local Docker Desktop path is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy_local_demo.ps1
+python demo_k8s.py --scenario image_pull
+```
+
+The image-pull scenario has been verified to recover with an approximate MTTR of `17.7s`.

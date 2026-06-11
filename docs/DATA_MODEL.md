@@ -108,6 +108,7 @@ Stores operational memory for similar-failure lookup before invoking Ollama.
 | `failure_signature` | Normalized failure signature. |
 | `root_cause` | Stored RCA result. |
 | `healing_action` | Previously successful action summary. |
+| `source_domain` | `ETL` or `K8S`, used to separate pipeline incidents from Kubernetes AI-SRE incidents. |
 | `successful` | Whether the prior incident healed successfully. |
 | `timestamp` | Incident timestamp. |
 
@@ -130,6 +131,21 @@ Stores every autonomous action for audit.
 ### `human_approvals`
 
 Stores pending plans when human-in-the-loop mode is enabled.
+
+Kubernetes approval-required actions, such as `increase_memory_limit` and `refresh_secret`, reuse this table.
+
+## Kubernetes AI-SRE Metadata
+
+Kubernetes events and remediations are stored in the same observability tables:
+
+| Table | K8s Usage |
+|---|---|
+| `pipeline_events` | Stores `K8sDeploymentDegraded`, `K8sImagePullFailed`, `K8sPodCrashLoopDetected`, `K8sOOMKilled`, `K8sJobFailed`, `K8sHighRestartCount`, and `K8sDiagnosticLog`. |
+| `incident_history` | Stores K8s incident memory with `source_domain='K8S'`. |
+| `healing_actions` | Stores actions from `K8sHealingEngine`, including restart, rollback, scale, retry, inspection, and diagnostic actions. |
+| `human_approvals` | Stores high-risk Kubernetes remediation requests. |
+
+The K8s extension does not add separate incident tables; it extends the existing observability model.
 
 ## Taxi Fact Grain
 
@@ -209,6 +225,8 @@ erDiagram
 | Average trip duration | `avg(trip_duration)` |
 | MTTD | `avg(DriftEvent.detected_at - PipelineRun.started_at)` |
 | MTTR | `avg(QuarantineRecord.resolved_at - QuarantineRecord.quarantined_at)` |
+
+For `demo_k8s.py`, the printed MTTR is an approximate wall-clock duration from failure injection to the latest Deployment generation becoming fully ready and available.
 
 ## Schema Evolution Behavior
 

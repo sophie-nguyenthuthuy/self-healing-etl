@@ -11,6 +11,10 @@ python main.py --taxi-demo --taxi-records 30 --autonomous-mode
 python main.py --taxi-demo --taxi-records 30 --autonomous-mode --human-approval
 python main.py --taxi-stream
 streamlit run taxi_etl/dashboard/app.py
+powershell -ExecutionPolicy Bypass -File .\deploy_local_demo.ps1
+python demo_k8s.py --scenario image_pull
+python demo_k8s.py --scenario api_rate_limit
+python demo_k8s.py --scenario staging_data_quality
 ```
 
 Use `python -B` on Windows if `__pycache__` permissions are noisy:
@@ -66,6 +70,62 @@ select status, count(*) from human_approvals group by status;
 
 The CLI routes Prefect runtime state to a temporary folder to avoid user-home and OneDrive permission issues.
 
+## Dashboard Refresh And Scope
+
+The dashboard defaults to a 120-second auto-refresh to avoid overly aggressive reloads during demos. Use the sidebar `Refresh now` button for immediate reloads.
+
+Use `Observability scope` to choose `All pipelines` or a specific pipeline name. `All pipelines` is recommended when demonstrating Kubernetes AI-SRE because K8s traces may use a different `pipeline_name` than the taxi ETL pipeline.
+
+If Live Events, Root Cause Analysis, or Healing Timeline show failures while Pipeline Health or Agent Decisions appear empty, check that the scope is not filtering to only the taxi pipeline.
+
+## Kubernetes Local Demo Operations
+
+Deploy the local Docker Kubernetes demo:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy_local_demo.ps1
+```
+
+The script checks Docker and `kubectl`, builds local images, applies Kubernetes manifests, restarts ETL and AI-SRE deployments, and waits for readiness.
+
+Run a live failure injection:
+
+```bash
+python demo_k8s.py --scenario image_pull
+```
+
+Other scenarios:
+
+```bash
+python demo_k8s.py --scenario crash_loop
+python demo_k8s.py --scenario oom
+python demo_k8s.py --scenario scale_zero
+```
+
+Modern ETL failure scenarios do not require Kubernetes:
+
+```bash
+python demo_k8s.py --scenario api_rate_limit
+python demo_k8s.py --scenario staging_data_quality
+python demo_k8s.py --scenario timeout
+python demo_k8s.py --scenario concurrent_modification
+```
+
+Check cluster state:
+
+```bash
+kubectl get pods -n self-healing-etl
+kubectl logs deployment/ai-sre -n self-healing-etl --tail=80
+kubectl rollout status deployment/self-healing-etl -n self-healing-etl --timeout=120s
+```
+
+Expected healthy local K8s state:
+
+- `postgres-0` is `1/1 Running`.
+- `ai-sre` is `1/1 Running`.
+- Current `self-healing-etl` pod is `1/1 Running`.
+- Old ETL pods may briefly show `Terminating` during rollback or rollout.
+
 ## Quarantine Review
 
 Quarantined records include:
@@ -106,6 +166,10 @@ print(store.stats(pipeline_name="taxi_realtime_pipeline"))
 | Records quarantined as `TRANSFORM_ERROR` | Custom transform raised an exception. | Check transform logic and input shape. |
 | Drift detected but not healed | Strict mode enabled or healing disabled. | Disable strict mode or enable the relevant healing strategy. |
 | Loader schema issue | Destination table missing new columns or incompatible types. | Framework adds missing columns; for stricter DBs, update warehouse DDL. |
+| PowerShell blocks `deploy_local_demo.ps1` | Script execution policy. | Run `powershell -ExecutionPolicy Bypass -File .\deploy_local_demo.ps1`. |
+| AI-SRE pod exits immediately | Old image, cluster access issue, or DB URL issue. | Rerun deploy script, then inspect `kubectl logs deployment/ai-sre -n self-healing-etl --tail=120`. |
+| ETL pod exits with `--source is required` | Old rollback logic cleared deployment args. | Rebuild/redeploy current code; rollback now preserves previous command and args. |
+| Image-pull demo appears recovered while old pod is still running | Old readiness script or incomplete rollout check. | Use current `demo_k8s.py`; it validates the latest Deployment generation. |
 
 ## Recommended Validation Checklist
 
@@ -126,3 +190,5 @@ print(store.stats(pipeline_name="taxi_realtime_pipeline"))
 - Add service-level monitoring for data freshness, row-count anomalies, and warehouse load failures.
 - Add authentication and role-based access for quarantine review.
 - Add unit and integration tests for each healing scenario.
+- Replace local K8s demo secrets and `latest` image tags before production use.
+- Scope Kubernetes RBAC by namespace where possible and separate inspection permissions from mutation permissions.

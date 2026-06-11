@@ -52,6 +52,7 @@ class IncidentStore:
         root_cause: str,
         healing_action: str,
         successful: bool,
+        source_domain: str = "ETL",
     ) -> None:
         with Session(self.engine) as session:
             session.add(
@@ -59,8 +60,8 @@ class IncidentStore:
                     failure_signature=self.signature(failure_text),
                     root_cause=root_cause,
                     healing_action=healing_action,
+                    source_domain=source_domain,
                     successful=successful,
                 )
             )
             session.commit()
-

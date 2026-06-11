@@ -17,6 +17,12 @@ class ObserverAgent:
         "PipelineFailed",
         "ResourceExhausted",
         "DatabaseConnectionFailed",
+        "K8sPodCrashLoopDetected",
+        "K8sImagePullFailed",
+        "K8sOOMKilled",
+        "K8sJobFailed",
+        "K8sDeploymentDegraded",
+        "K8sHighRestartCount",
     }
 
     def __init__(self, on_failure: Callable[[ObservabilityEvent], None] | None = None):
@@ -36,4 +42,3 @@ class ObserverAgent:
         if event.event_type == "QuarantineTriggered" and event.metadata.get("rows_quarantined", 0) > 0:
             return True
         return False
-
