@@ -20,6 +20,9 @@ from pipeline.transformer import transform_task, TransformFn
 from pipeline.loader import load_task
 from alerts.alerter import Alerter
 from quarantine.store import QuarantineStore
+from agents.autonomous_loop import AutonomousHealingLoop
+from observability.event_bus import EventBus, ObservabilityEvent
+from observability.traces import new_span_id, new_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,7 @@ def etl_flow(
     """
     cfg = config or ETLConfig()
     run_id = _run_id()
+    trace_id = new_trace_id()
     plog = get_run_logger()
     plog.info("Starting ETL run %s for source '%s'", run_id, source_name)
 
@@ -56,6 +60,18 @@ def etl_flow(
     alerter = Alerter(
         slack_webhook_url=cfg.alerts.slack_webhook_url,
         min_severity=cfg.alerts.min_severity,
+    )
+    event_bus = EventBus(cfg.quarantine.db_url)
+    event_bus.emit(
+        run_id=run_id,
+        pipeline_name=cfg.pipeline_name,
+        event_type="PipelineStarted",
+        severity="INFO",
+        component="orchestrator",
+        message=f"Pipeline started for source {source_name}",
+        trace_id=trace_id,
+        span_id=new_span_id("pipeline"),
+        metadata={"source_type": source_type, "destination_type": destination_type},
     )
 
     pipeline_run = PipelineRun(
@@ -77,6 +93,7 @@ def etl_flow(
         "rows_quarantined": 0,
         "schema_evolved": False,
         "drift_detected": False,
+        "trace_id": trace_id,
     }
 
     try:
@@ -86,6 +103,10 @@ def etl_flow(
             source_path=source_path,
             source_df=source_df,
             batch_size=cfg.batch_size,
+            run_id=run_id,
+            pipeline_name=cfg.pipeline_name,
+            event_db_url=cfg.quarantine.db_url,
+            trace_id=trace_id,
         )
         summary["rows_extracted"] = sum(len(b) for b in batches)
 
@@ -96,6 +117,7 @@ def etl_flow(
             run_id=run_id,
             config=cfg,
             custom_transform=custom_transform,
+            trace_id=trace_id,
         )
         summary["rows_quarantined"] = t_result.rows_quarantined
         summary["drift_detected"] = any(r.has_drift for r in t_result.drift_reports)
@@ -112,9 +134,40 @@ def etl_flow(
             destination_path=destination_path,
             db_engine=dest_engine,
             table_name=destination_table,
+            run_id=run_id,
+            pipeline_name=cfg.pipeline_name,
+            event_db_url=cfg.quarantine.db_url,
+            trace_id=trace_id,
         )
         summary["rows_loaded"] = rows_loaded
         summary["status"] = "SUCCESS"
+        _maybe_autonomous_recovery(
+            cfg=cfg,
+            event_bus=event_bus,
+            run_id=run_id,
+            trace_id=trace_id,
+            source_name=source_name,
+            summary=summary,
+            context={
+                "summary": dict(summary),
+                "batch_size": cfg.batch_size,
+                "source_type": source_type,
+                "destination_type": destination_type,
+                "destination_path": destination_path,
+                "destination_table": destination_table,
+            },
+        )
+        event_bus.emit(
+            run_id=run_id,
+            pipeline_name=cfg.pipeline_name,
+            event_type="PipelineCompleted",
+            severity="INFO",
+            component="orchestrator",
+            message="Pipeline completed",
+            trace_id=trace_id,
+            span_id=new_span_id("pipeline-completed"),
+            metadata=dict(summary),
+        )
 
         plog.info(
             "ETL run %s complete: extracted=%d loaded=%d quarantined=%d drift=%s evolved=%s",
@@ -130,6 +183,23 @@ def etl_flow(
         summary["status"] = "FAILED"
         summary["error"] = str(exc)
         plog.error("ETL run %s FAILED: %s", run_id, exc)
+        failure_event = event_bus.emit(
+            run_id=run_id,
+            pipeline_name=cfg.pipeline_name,
+            event_type="PipelineFailed",
+            severity="ERROR",
+            component="orchestrator",
+            message=str(exc),
+            trace_id=trace_id,
+            span_id=new_span_id("pipeline-failed"),
+            metadata={
+                "source_type": source_type,
+                "destination_type": destination_type,
+                "source_path": source_path,
+                "destination_path": destination_path,
+                "error": type(exc).__name__,
+            },
+        )
         alerter.pipeline_failure_alert(
             pipeline_name=cfg.pipeline_name,
             source_name=source_name,
@@ -141,6 +211,25 @@ def etl_flow(
                 f"Source: {source_type}  Destination: {destination_type}",
             ],
         )
+        if cfg.autonomous.enable_autonomous_healing:
+            loop = AutonomousHealingLoop(cfg.quarantine.db_url, cfg.autonomous)
+            loop_result = loop.handle_failure(
+                failure_event,
+                context={
+                    "summary": dict(summary),
+                    "batch_size": cfg.batch_size,
+                    "source_type": source_type,
+                    "destination_type": destination_type,
+                    "source_path": source_path,
+                    "destination_path": destination_path,
+                    "destination_table": destination_table,
+                    "destination_reachable": False,
+                },
+            )
+            summary["autonomous_healing"] = loop_result.as_dict()
+            if loop_result.escalated:
+                summary["status"] = "ESCALATED"
+            return summary
         raise
 
     finally:
@@ -163,6 +252,42 @@ def etl_flow(
             session.commit()
 
     return summary
+
+
+def _maybe_autonomous_recovery(
+    *,
+    cfg: ETLConfig,
+    event_bus: EventBus,
+    run_id: str,
+    trace_id: str,
+    source_name: str,
+    summary: dict,
+    context: dict,
+) -> None:
+    if not cfg.autonomous.enable_autonomous_healing:
+        return
+    if not summary.get("drift_detected") and not summary.get("rows_quarantined"):
+        return
+
+    event_type = "QuarantineTriggered" if summary.get("rows_quarantined") else "SchemaDriftDetected"
+    severity = "ERROR" if summary.get("rows_quarantined") else "WARNING"
+    event = event_bus.emit(
+        run_id=run_id,
+        pipeline_name=cfg.pipeline_name,
+        event_type=event_type,
+        severity=severity,
+        component="orchestrator",
+        message=(
+            f"Autonomous review triggered for source {source_name}: "
+            f"drift={summary.get('drift_detected')} quarantined={summary.get('rows_quarantined')}"
+        ),
+        trace_id=trace_id,
+        span_id=new_span_id("autonomous-trigger"),
+        metadata=dict(summary),
+    )
+    loop = AutonomousHealingLoop(cfg.quarantine.db_url, cfg.autonomous)
+    result = loop.handle_failure(event, context=context)
+    summary["autonomous_healing"] = result.as_dict()
 
 
 def _run_id() -> str:

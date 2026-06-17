@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ai-sre
+  namespace: self-healing-etl
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: self-healing-etl-ai-sre
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "nodes", "configmaps"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: self-healing-etl-ai-sre
+subjects:
+  - kind: ServiceAccount
+    name: ai-sre
+    namespace: self-healing-etl
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: self-healing-etl-ai-sre
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-sre
+  namespace: self-healing-etl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-sre
+  template:
+    metadata:
+      labels:
+        app: ai-sre
+    spec:
+      serviceAccountName: ai-sre
+      containers:
+        - name: ai-sre
+          image: self-healing-etl-ai-sre:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: self-healing-etl-config
+            - secretRef:
+                name: self-healing-etl-secrets
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: self-healing-etl-secrets
+                  key: POSTGRES_PASSWORD
+            - name: SCHEMA_REGISTRY_DB
+              value: postgresql+psycopg://etl:$(POSTGRES_PASSWORD)@postgres.self-healing-etl.svc.cluster.local:5432/etl
+            - name: QUARANTINE_DB
+              value: postgresql+psycopg://etl:$(POSTGRES_PASSWORD)@postgres.self-healing-etl.svc.cluster.local:5432/etl

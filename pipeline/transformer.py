@@ -8,6 +8,7 @@ from typing import Callable, Any
 
 import pandas as pd
 from prefect import task
+from prefect.cache_policies import NO_CACHE
 
 # project-local imports resolved via sys.path set in orchestrator
 from schema.drift_detector import DriftDetector, DriftReport, schema_from_df
@@ -16,6 +17,8 @@ from quarantine.store import QuarantineStore
 from healing.strategies import HealingEngine, HealingResult
 from alerts.alerter import Alerter
 from config import ETLConfig
+from observability.event_bus import EventBus
+from observability.traces import new_span_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +36,14 @@ class TransformResult:
     schema_evolved: bool = False
 
 
-@task(name="transform", retries=1, retry_delay_seconds=5, log_prints=True)
+@task(name="transform", retries=1, retry_delay_seconds=5, log_prints=True, cache_policy=NO_CACHE)
 def transform_task(
     batches: list[pd.DataFrame],
     source_name: str,
     run_id: str,
     config: ETLConfig,
     custom_transform: TransformFn | None = None,
+    trace_id: str | None = None,
 ) -> TransformResult:
     registry = SchemaRegistry(config.schema_registry.db_url)
     quarantine = QuarantineStore(config.quarantine.db_url)
@@ -56,15 +60,21 @@ def transform_task(
     )
 
     result = TransformResult()
+    bus = EventBus(config.quarantine.db_url)
+    trace_id = trace_id or run_id
+    bus.emit(
+        run_id=run_id,
+        pipeline_name=config.pipeline_name,
+        event_type="TransformStarted",
+        severity="INFO",
+        component="transformer",
+        message=f"Transforming {len(batches)} batch(es)",
+        trace_id=trace_id,
+        span_id=new_span_id("transform"),
+        metadata={"batches": len(batches), "source_name": source_name},
+    )
 
-    # Ensure a baseline schema is registered from the first batch
     schema_info = registry.get_active(source_name)
-    if schema_info is None:
-        first_batch = batches[0] if batches else pd.DataFrame()
-        if not first_batch.empty:
-            version = registry.register(source_name, schema_from_df(first_batch))
-            logger.info("Auto-registered initial schema v%d for '%s'", version, source_name)
-            schema_info = registry.get_active(source_name)
 
     for batch_idx, batch in enumerate(batches):
         result.rows_total += len(batch)
@@ -75,6 +85,17 @@ def transform_task(
                 batch = custom_transform(batch)
             except Exception as exc:
                 logger.error("Custom transform failed on batch %d: %s", batch_idx, exc)
+                bus.emit(
+                    run_id=run_id,
+                    pipeline_name=config.pipeline_name,
+                    event_type="TransformFailed",
+                    severity="ERROR",
+                    component="transformer",
+                    message=str(exc),
+                    trace_id=trace_id,
+                    span_id=new_span_id("transform-failed"),
+                    metadata={"batch_index": batch_idx, "rows": len(batch), "error": type(exc).__name__},
+                )
                 _quarantine_batch(
                     quarantine, batch, config, source_name, run_id,
                     "TRANSFORM_ERROR", str(exc),
@@ -82,7 +103,24 @@ def transform_task(
                                     "Check transform logic for data-dependent failures.",
                 )
                 result.rows_quarantined += len(batch)
+                bus.emit(
+                    run_id=run_id,
+                    pipeline_name=config.pipeline_name,
+                    event_type="QuarantineTriggered",
+                    severity="ERROR",
+                    component="quarantine",
+                    message=f"Quarantined {len(batch)} transform-failed rows",
+                    trace_id=trace_id,
+                    span_id=new_span_id("quarantine"),
+                    metadata={"rows_quarantined": len(batch), "error_type": "TRANSFORM_ERROR"},
+                )
                 continue
+
+        # Ensure the baseline schema reflects the business-ready shape.
+        if schema_info is None and not batch.empty:
+            version = registry.register(source_name, schema_from_df(batch))
+            logger.info("Auto-registered initial schema v%d for '%s'", version, source_name)
+            schema_info = registry.get_active(source_name)
 
         # --- Drift detection ---
         if schema_info is None:
@@ -107,6 +145,17 @@ def transform_task(
             drift_type=",".join(drift.drift_types),
             details_json=drift.to_details_json(),
         )
+        bus.emit(
+            run_id=run_id,
+            pipeline_name=config.pipeline_name,
+            event_type="SchemaDriftDetected",
+            severity="WARNING",
+            component="drift_detector",
+            message=drift.summary(),
+            trace_id=trace_id,
+            span_id=new_span_id("drift"),
+            metadata={"drift_event_id": drift_event_id, "details": drift.to_details_json()},
+        )
 
         if config.schema_registry.strict_mode:
             _quarantine_batch(
@@ -122,6 +171,17 @@ def transform_task(
                 metrics={"batch_index": batch_idx, "rows": len(batch)},
             )
             result.rows_quarantined += len(batch)
+            bus.emit(
+                run_id=run_id,
+                pipeline_name=config.pipeline_name,
+                event_type="QuarantineTriggered",
+                severity="ERROR",
+                component="quarantine",
+                message=f"Strict mode quarantined {len(batch)} rows",
+                trace_id=trace_id,
+                span_id=new_span_id("quarantine"),
+                metadata={"rows_quarantined": len(batch), "error_type": "SCHEMA_DRIFT"},
+            )
             continue
 
         # --- Attempt healing ---
@@ -142,6 +202,17 @@ def transform_task(
                 metrics={"batch_index": batch_idx, "rows": len(batch), "coercion_loss": heal.rows_coerced},
             )
             result.rows_quarantined += len(batch)
+            bus.emit(
+                run_id=run_id,
+                pipeline_name=config.pipeline_name,
+                event_type="QuarantineTriggered",
+                severity="ERROR",
+                component="quarantine",
+                message=f"Healing failed; quarantined {len(batch)} rows",
+                trace_id=trace_id,
+                span_id=new_span_id("quarantine"),
+                metadata={"rows_quarantined": len(batch), "error_type": "HEALING_FAILED", "reason": heal.failure_reason},
+            )
             continue
 
         # Healing succeeded — quarantine any coercion failures within the batch
@@ -154,6 +225,17 @@ def transform_task(
                 schema_version=exp_version,
             )
             result.rows_quarantined += len(heal.failed_records)
+            bus.emit(
+                run_id=run_id,
+                pipeline_name=config.pipeline_name,
+                event_type="QuarantineTriggered",
+                severity="ERROR",
+                component="quarantine",
+                message=f"Quarantined {len(heal.failed_records)} coercion-failed rows",
+                trace_id=trace_id,
+                span_id=new_span_id("quarantine"),
+                metadata={"rows_quarantined": len(heal.failed_records), "error_type": "COERCION_FAILURE"},
+            )
             alerter.quarantine_alert(
                 config.pipeline_name, source_name, run_id,
                 len(heal.failed_records), "COERCION_FAILURE",
@@ -197,6 +279,22 @@ def transform_task(
     logger.info(
         "Transform complete: total=%d clean=%d quarantined=%d schema_evolved=%s",
         result.rows_total, result.rows_clean, result.rows_quarantined, result.schema_evolved,
+    )
+    bus.emit(
+        run_id=run_id,
+        pipeline_name=config.pipeline_name,
+        event_type="TransformCompleted",
+        severity="INFO",
+        component="transformer",
+        message=f"Transform complete: clean={result.rows_clean}, quarantined={result.rows_quarantined}",
+        trace_id=trace_id,
+        span_id=new_span_id("transform-completed"),
+        metadata={
+            "rows_total": result.rows_total,
+            "rows_clean": result.rows_clean,
+            "rows_quarantined": result.rows_quarantined,
+            "schema_evolved": result.schema_evolved,
+        },
     )
     return result
 

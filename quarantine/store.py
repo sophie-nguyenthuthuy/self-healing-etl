@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select, update, delete
 from sqlalchemy.orm import Session
 
-from models import QuarantineRecord, DriftEvent, init_db
+from models import QuarantineRecord, DriftEvent, PipelineRun, ensure_quarantine_schema, init_db
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ class QuarantineStore:
 
     def __init__(self, db_url: str):
         self.engine = init_db(db_url)
+        ensure_quarantine_schema(self.engine)
 
     # ------------------------------------------------------------------
     # Record quarantine
@@ -119,14 +120,18 @@ class QuarantineStore:
             return list(session.scalars(q).all())
 
     def mark_resolved(self, record_ids: list[int]) -> int:
+        if not record_ids:
+            return 0
+
+        resolved_at = datetime.utcnow()
         with Session(self.engine) as session:
-            session.execute(
+            result = session.execute(
                 update(QuarantineRecord)
                 .where(QuarantineRecord.id.in_(record_ids))
-                .values(resolved=True)
+                .values(resolved=True, resolved_at=resolved_at)
             )
             session.commit()
-        return len(record_ids)
+        return result.rowcount or 0
 
     def purge_old(self, older_than_days: int) -> int:
         cutoff = datetime.utcnow() - timedelta(days=older_than_days)
@@ -145,18 +150,44 @@ class QuarantineStore:
     # Stats
     # ------------------------------------------------------------------
 
-    def stats(self, pipeline_name: str | None = None) -> dict[str, int]:
+    def stats(self, pipeline_name: str | None = None) -> dict[str, Any]:
         with Session(self.engine) as session:
             base = select(QuarantineRecord)
             if pipeline_name:
                 base = base.where(QuarantineRecord.pipeline_name == pipeline_name)
             all_records = list(session.scalars(base).all())
+
+            drift_latency_query = (
+                select(DriftEvent.detected_at, PipelineRun.started_at)
+                .join(PipelineRun, DriftEvent.run_id == PipelineRun.run_id)
+            )
+            if pipeline_name:
+                drift_latency_query = drift_latency_query.where(
+                    DriftEvent.pipeline_name == pipeline_name
+                )
+            drift_latency_rows = session.execute(drift_latency_query).all()
+
+        mttr_samples = [
+            (r.resolved_at - r.quarantined_at).total_seconds()
+            for r in all_records
+            if r.resolved and r.resolved_at and r.quarantined_at
+        ]
+        mttd_samples = [
+            (detected_at - started_at).total_seconds()
+            for detected_at, started_at in drift_latency_rows
+            if detected_at and started_at
+        ]
+
         return {
             "total": len(all_records),
             "unresolved": sum(1 for r in all_records if not r.resolved),
             "resolved": sum(1 for r in all_records if r.resolved),
             "by_error_type": _count_by(all_records, lambda r: r.error_type),
             "by_source": _count_by(all_records, lambda r: r.source_name),
+            "mttr_seconds": _average(mttr_samples),
+            "mttr_sample_count": len(mttr_samples),
+            "mttd_seconds": _average(mttd_samples),
+            "mttd_sample_count": len(mttd_samples),
         }
 
 
@@ -166,3 +197,9 @@ def _count_by(records: list, key_fn) -> dict[str, int]:
         k = key_fn(r)
         counts[k] = counts.get(k, 0) + 1
     return counts
+
+
+def _average(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)

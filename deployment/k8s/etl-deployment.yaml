@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: self-healing-etl
+  namespace: self-healing-etl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: self-healing-etl
+  template:
+    metadata:
+      labels:
+        app: self-healing-etl
+    spec:
+      containers:
+        - name: etl
+          image: self-healing-etl:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: self-healing-etl-config
+            - secretRef:
+                name: self-healing-etl-secrets
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: self-healing-etl-secrets
+                  key: POSTGRES_PASSWORD
+            - name: SCHEMA_REGISTRY_DB
+              value: postgresql+psycopg://etl:$(POSTGRES_PASSWORD)@postgres.self-healing-etl.svc.cluster.local:5432/etl
+            - name: QUARANTINE_DB
+              value: postgresql+psycopg://etl:$(POSTGRES_PASSWORD)@postgres.self-healing-etl.svc.cluster.local:5432/etl
+          args: ["--taxi-stream"]
